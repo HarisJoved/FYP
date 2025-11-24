@@ -1,0 +1,91 @@
+
+## 2. .gitignore File
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Model files (LARGE - exclude from git)
+*.pth
+*.pt
+*.ckpt
+*.h5
+*.pkl
+*.safetensors
+diffusionpen_iam_model_path/
+style_models/
+*.pth.tar
+*.pt.tar
+
+# Dataset files (LARGE - exclude from git)
+saved_iam_data/
+imgs/
+image_samples/
+custom_generated/
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.tiff
+*.gif
+!MY_HANDWRITING.png  # Keep example output
+
+# Logs and outputs
+logs/
+wandb/
+*.log
+runs/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# Weights & Biases
+.wandb/
+
+# Large JSON files (if they contain datasets)
+# Uncomment if needed:
+# writers_dict_train.json
+# writers_dict_test.json

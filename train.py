@@ -23,6 +23,8 @@ from utils.auxilary_functions import *
 from torchvision.utils import save_image
 from torch.nn import DataParallel
 from transformers import CanineModel, CanineTokenizer
+import string
+import cv2
 
 torch.cuda.empty_cache()
 OUTPUT_MAX_LEN = 95 #+ 2  # <GO>+groundtruth+<END>
@@ -32,6 +34,36 @@ IMG_HEIGHT = 64
 c_classes = '_!"#&\'()*+,-./0123456789:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz '
 cdict = {c:i for i,c in enumerate(c_classes)}
 icdict = {i:c for i,c in enumerate(c_classes)}
+
+def save_single_images(images, path, args):
+    """Save single image from tensor"""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    
+    # Convert tensor to PIL Image
+    if isinstance(images, torch.Tensor):
+        # Handle single image
+        if len(images.shape) == 4:  # [batch, channels, height, width]
+            image = images[0]  # Take first image
+        else:
+            image = images
+        
+        # Convert to PIL
+        if image.shape[0] == 3:  # RGB
+            image_np = image.permute(1, 2, 0).cpu().numpy()
+            image_np = (image_np * 255).astype(np.uint8)
+            im = Image.fromarray(image_np)
+            if args.color == False:
+                im = im.convert('L')
+        else:  # Grayscale
+            image_np = image.squeeze().cpu().numpy()
+            image_np = (image_np * 255).astype(np.uint8)
+            im = Image.fromarray(image_np, mode='L')
+    else:
+        im = images
+    
+    im.save(path)
+    print(f"Saved image to: {path}")
+    return im
 
 ### Borrowed from GANwriting ###
 def label_padding(labels, num_tokens):
@@ -239,7 +271,9 @@ class Diffusion:
         model.train()
         if args.latent==True:
             latents = 1 / 0.18215 * x
-            image = vae.module.decode(latents).sample
+            # Handle both DataParallel and non-DataParallel cases
+            vae_decoder = vae.module if hasattr(vae, 'module') else vae
+            image = vae_decoder.decode(latents).sample
 
             image = (image / 2 + 0.5).clamp(0, 1)
             image = image.cpu().permute(0, 2, 3, 1).numpy()
@@ -291,7 +325,6 @@ class Diffusion:
                         else:
                             matching_lines = [line for line in train_data if line[1] == reverse_wr_dict[label_index]]
                             #print('matching lines', matching_lines)
-                            five_styles = matching_lines_style[:5]
                             five_styles = [matching_lines[0]]*5
                             #five_styles = random.sample(matching_lines, 5)
                         print('five_styles', five_styles)
@@ -332,7 +365,9 @@ class Diffusion:
                             cor_im_tens = transform(cor_image).to(args.device)
                             #print('cor image', cor_im_tens.shape)
                             cor_im_tens = cor_im_tens.unsqueeze(0)
-                            cor_images = vae.module.encode(cor_im_tens.to(torch.float32)).latent_dist.sample()
+                            # Handle both DataParallel and non-DataParallel cases
+                            vae_encoder = vae.module if hasattr(vae, 'module') else vae
+                            cor_images = vae_encoder.encode(cor_im_tens.to(torch.float32)).latent_dist.sample()
                             cor_images = cor_images * 0.18215
                             
                         st_imgs = []
@@ -427,7 +462,9 @@ class Diffusion:
         model.train()
         if args.latent==True:
             latents = 1 / 0.18215 * x
-            image = vae.module.decode(latents).sample
+            # Handle both DataParallel and non-DataParallel cases
+            vae_decoder = vae.module if hasattr(vae, 'module') else vae
+            image = vae_decoder.decode(latents).sample
 
             image = (image / 2 + 0.5).clamp(0, 1)
             image = image.cpu().permute(0, 2, 3, 1).numpy()
@@ -477,7 +514,9 @@ def train(diffusion, model, ema, ema_model, vae, optimizer, mse_loss, loader, te
                 style_features = None
 
             if args.latent == True:
-                images = vae.module.encode(images.to(torch.float32)).latent_dist.sample()
+                # Handle both DataParallel and non-DataParallel cases
+                vae_encoder = vae.module if hasattr(vae, 'module') else vae
+                images = vae_encoder.encode(images.to(torch.float32)).latent_dist.sample()
                 images = images * 0.18215
                 latents = images
             
@@ -563,7 +602,7 @@ def main():
     parser.add_argument('--num_heads', type=int, default=4)
     parser.add_argument('--num_res_blocks', type=int, default=1)
     parser.add_argument('--save_path', type=str, default='./diffusionpen_iam_model_path') 
-    parser.add_argument('--device', type=str, default='cuda:0')
+    parser.add_argument('--device', type=str, default=None, help='Device to use: cuda:0, cuda:1, or cpu. If not specified, auto-detects.')
     parser.add_argument('--wandb_log', type=bool, default=False)
     parser.add_argument('--color', type=bool, default=True)
     parser.add_argument('--unet', type=str, default='unet_latent', help='unet_latent')
@@ -575,11 +614,27 @@ def main():
     parser.add_argument('--sampling_word', type=bool, default=False) 
     parser.add_argument('--mix_rate', type=float, default=None)
     parser.add_argument('--style_path', type=str, default='./style_models/iam_style_diffusionpen.pth')
-    parser.add_argument('--stable_dif_path', type=str, default='./stable-diffusion-v1-5')
+    parser.add_argument('--stable_dif_path', type=str, default='stable-diffusion-v1-5/stable-diffusion-v1-5', help='Path to Stable Diffusion v1.5. Can be local path or Hugging Face model ID.')
     parser.add_argument('--train_mode', type=str, default='train', help='train, sampling')
     parser.add_argument('--sampling_mode', type=str, default='single_sampling', help='single_sampling (generate single image), paragraph (generate paragraph)')
     
     args = parser.parse_args()
+    
+    # Auto-detect device if not specified
+    if args.device is None:
+        if torch.cuda.is_available():
+            args.device = 'cuda:0'
+            print(f"CUDA available. Using device: {args.device}")
+        else:
+            args.device = 'cpu'
+            print("CUDA not available. Using CPU.")
+    else:
+        # Check if specified device is valid
+        if args.device.startswith('cuda') and not torch.cuda.is_available():
+            print(f"Warning: {args.device} specified but CUDA not available. Switching to CPU.")
+            args.device = 'cpu'
+        else:
+            print(f"Using specified device: {args.device}")
     
     print('torch version', torch.__version__)
     
@@ -591,48 +646,61 @@ def main():
     #create save directories
     setup_logging(args)
 
-    ############################ DATASET ############################
-    transform = transforms.Compose([
-                        #transforms.RandomAffine(degrees=10, translate=(0.1, 0.1), scale=(0.9, 1.1), shear=0.1, fill=255),
-                        transforms.ToTensor(),
-                        torchvision.transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)) #transforms.Normalize((0.5,), (0.5,)),  #
-                        ])
-    
-    if args.dataset == 'iam':
-        print('loading IAM')
-        iam_folder = './iam_data/words'
-        myDataset = IAMDataset
-        style_classes = 339
-        if args.level == 'word':
-            train_data = myDataset(iam_folder, 'train', 'word', fixed_size=(1 * 64, 256), tokenizer=None, text_encoder=None, feat_extractor=None, transforms=transform, args=args)
-        else:
-            train_data = myDataset(iam_folder, 'train', 'word', fixed_size=(1 * 64, 256), tokenizer=None, text_encoder=None, feat_extractor=None, transforms=transform, args=args)
-            test_data = myDataset(iam_folder, 'test', 'word', fixed_size=(1 * 64, 256), tokenizer=None, text_encoder=None, feat_extractor=None, transforms=transform, args=args)
-        print('train data', len(train_data))
-        
-        test_size = args.batch_size
-        rest = len(train_data) - test_size
-        test_data, _ = random_split(train_data, [test_size, rest], generator=torch.Generator().manual_seed(42))
-        
-    elif args.dataset == 'gnhk':
-        print('loading GNHK')
-        myDataset = GNHK_Dataset
-        dataset_folder = 'path/to/GNHK'
-        style_classes = 515
-        train_transform = transforms.Compose([
-                            transforms.ToTensor(),
-                            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)) #transforms.Normalize((0.5,), (0.5,)),  #
-                            ])
-        train_data = myDataset(dataset_folder, 'train', 'word', fixed_size=(1 * 64, 256), tokenizer=None, text_encoder=None, feat_extractor=None, transforms=train_transform, args=args)
-        test_size = args.batch_size
-        rest = len(train_data) - test_size
-        test_data, _ = random_split(train_data, [test_size, rest], generator=torch.Generator().manual_seed(42))
-        
-    train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True, num_workers=4)
-
-    test_loader = DataLoader(test_data, batch_size=args.batch_size, shuffle=False, num_workers=4)
+    # Define character classes (used by both train and sampling modes)
     character_classes = ['!', '"', '#', '&', "'", '(', ')', '*', '+', ',', '-', '.', '/', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', ':', ';', '?', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', ' ']
-    
+
+    ############################ DATASET ############################
+    # Only load dataset if training mode
+    if args.train_mode == 'train':
+        transform = transforms.Compose([
+                            #transforms.RandomAffine(degrees=10, translate=(0.1, 0.1), scale=(0.9, 1.1), shear=0.1, fill=255),
+                            transforms.ToTensor(),
+                            torchvision.transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)) #transforms.Normalize((0.5,), (0.5,)),  #
+                            ])
+        
+        if args.dataset == 'iam':
+            print('loading IAM')
+            iam_folder = './iam_data/words'
+            myDataset = IAMDataset
+            style_classes = 339
+            if args.level == 'word':
+                train_data = myDataset(iam_folder, 'train', 'word', fixed_size=(1 * 64, 256), tokenizer=None, text_encoder=None, feat_extractor=None, transforms=transform, args=args)
+            else:
+                train_data = myDataset(iam_folder, 'train', 'word', fixed_size=(1 * 64, 256), tokenizer=None, text_encoder=None, feat_extractor=None, transforms=transform, args=args)
+                test_data = myDataset(iam_folder, 'test', 'word', fixed_size=(1 * 64, 256), tokenizer=None, text_encoder=None, feat_extractor=None, transforms=transform, args=args)
+            print('train data', len(train_data))
+            
+            test_size = args.batch_size
+            rest = len(train_data) - test_size
+            test_data, _ = random_split(train_data, [test_size, rest], generator=torch.Generator().manual_seed(42))
+            
+        elif args.dataset == 'gnhk':
+            print('loading GNHK')
+            myDataset = GNHK_Dataset
+            dataset_folder = 'path/to/GNHK'
+            style_classes = 515
+            train_transform = transforms.Compose([
+                                transforms.ToTensor(),
+                                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)) #transforms.Normalize((0.5,), (0.5,)),  #
+                                ])
+            train_data = myDataset(dataset_folder, 'train', 'word', fixed_size=(1 * 64, 256), tokenizer=None, text_encoder=None, feat_extractor=None, transforms=train_transform, args=args)
+            test_size = args.batch_size
+            rest = len(train_data) - test_size
+            test_data, _ = random_split(train_data, [test_size, rest], generator=torch.Generator().manual_seed(42))
+            
+        train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True, num_workers=4)
+
+        test_loader = DataLoader(test_data, batch_size=args.batch_size, shuffle=False, num_workers=4)
+    else:
+        # For sampling mode, we don't need dataset, but we need style_classes
+        style_classes = 339  # IAM has 339 style classes
+        train_loader = None
+        test_loader = None
+        transform = transforms.Compose([
+                            transforms.ToTensor(),
+                            torchvision.transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+                            ])
+                               
     ######################### MODEL #######################################
     if args.model_name == 'wordstylist':
         vocab_size = len(character_classes) + 2
@@ -641,18 +709,27 @@ def main():
         vocab_size = len(character_classes)
     print('Vocab size: ', vocab_size)
     
+    # Handle device IDs for DataParallel
     if args.dataparallel==True:
-        device_ids = [3,4]
+        if args.device == 'cpu':
+            print("Warning: DataParallel not supported for CPU. Using single device.")
+            device_ids = [0]
+        else:
+            device_ids = [3,4]
         print('using dataparallel with device:', device_ids)
     else:
-        idx = int(''.join(filter(str.isdigit, args.device)))
-        device_ids = [idx]
+        if args.device == 'cpu':
+            device_ids = [0]  # Dummy for CPU (DataParallel won't actually parallelize)
+        else:
+            idx = int(''.join(filter(str.isdigit, args.device)))
+            device_ids = [idx]
     #unet = unet.to(args.device)
 
     if args.model_name == 'diffusionpen':
         tokenizer = CanineTokenizer.from_pretrained("google/canine-c")
         text_encoder = CanineModel.from_pretrained("google/canine-c")
-        text_encoder = nn.DataParallel(text_encoder, device_ids=device_ids)
+        if args.device != 'cpu' and args.dataparallel:
+            text_encoder = nn.DataParallel(text_encoder, device_ids=device_ids)
         text_encoder = text_encoder.to(args.device)
         
     else:
@@ -662,7 +739,8 @@ def main():
     if args.unet=='unet_latent':
         unet = UNetModel(image_size = args.img_size, in_channels=args.channels, model_channels=args.emb_dim, out_channels=args.channels, num_res_blocks=args.num_res_blocks, attention_resolutions=(1,1), channel_mult=(1, 1), num_heads=args.num_heads, num_classes=style_classes, context_dim=args.emb_dim, vocab_size=vocab_size, text_encoder=text_encoder, args=args)#.to(args.device)
     
-    unet = DataParallel(unet, device_ids=device_ids)
+    if args.device != 'cpu' and args.dataparallel:
+        unet = DataParallel(unet, device_ids=device_ids)
     unet = unet.to(args.device)
     
     #print('unet parameters')
@@ -687,11 +765,14 @@ def main():
     
     if args.latent==True:
         print('VAE is true')
-        vae = AutoencoderKL.from_pretrained(args.stable_dif_path, subfolder="vae")
-        vae = DataParallel(vae, device_ids=device_ids)
+        vae_model = AutoencoderKL.from_pretrained(args.stable_dif_path, subfolder="vae")
+        # Freeze vae
+        vae_model.requires_grad_(False)
+        if args.device != 'cpu' and args.dataparallel:
+            vae = DataParallel(vae_model, device_ids=device_ids)
+        else:
+            vae = vae_model
         vae = vae.to(args.device)
-        # Freeze vae and text_encoder
-        vae.requires_grad_(False)
     else:
         vae = None
 
@@ -707,7 +788,8 @@ def main():
     state_dict = {k: v for k, v in state_dict.items() if k in model_dict and model_dict[k].shape == v.shape}
     model_dict.update(state_dict)
     feature_extractor.load_state_dict(model_dict)
-    feature_extractor = DataParallel(feature_extractor, device_ids=device_ids)
+    if args.device != 'cpu' and args.dataparallel:
+        feature_extractor = DataParallel(feature_extractor, device_ids=device_ids)
     feature_extractor = feature_extractor.to(args.device)
     feature_extractor.requires_grad_(False)
     feature_extractor.eval()
@@ -719,13 +801,45 @@ def main():
         
         print('Sampling started....')
         
-        unet.load_state_dict(torch.load(f'{args.save_path}/models/ckpt.pt', map_location=args.device))
+        # Load checkpoint
+        checkpoint = torch.load(f'{args.save_path}/models/ckpt.pt', map_location=args.device)
+        
+        # Filter out text_encoder keys if they exist (they might be from an old checkpoint format)
+        # Since we're using a separate text_encoder, these shouldn't be in UNet's state_dict
+        if any('text_encoder' in k for k in checkpoint.keys()):
+            print('Filtering out text_encoder keys from checkpoint (using separate text_encoder)...')
+            checkpoint = {k: v for k, v in checkpoint.items() if not k.startswith('text_encoder')}
+        
+        # Handle DataParallel keys (remove 'module.' prefix if present)
+        unet_state_dict = unet.module.state_dict() if hasattr(unet, 'module') else unet.state_dict()
+        if any(k.startswith('module.') for k in checkpoint.keys()) and not any(k.startswith('module.') for k in unet_state_dict.keys()):
+            # Checkpoint has 'module.' prefix but current model doesn't - remove prefix
+            checkpoint = {k.replace('module.', '') if k.startswith('module.') else k: v for k, v in checkpoint.items()}
+        elif any(k.startswith('module.') for k in unet_state_dict.keys()) and not any(k.startswith('module.') for k in checkpoint.keys()):
+            # Current model has 'module.' prefix but checkpoint doesn't - add prefix
+            checkpoint = {('module.' + k): v for k, v in checkpoint.items()}
+        
+        unet.load_state_dict(checkpoint, strict=False)
         print('unet loaded')
         unet.eval()
         
         ema = EMA(0.995)
         ema_model = copy.deepcopy(unet).eval().requires_grad_(False)
-        ema_model.load_state_dict(torch.load(f'{args.save_path}/models/ema_ckpt.pt'))
+        
+        # Load EMA checkpoint with same filtering
+        ema_checkpoint = torch.load(f'{args.save_path}/models/ema_ckpt.pt', map_location=args.device)
+        if any('text_encoder' in k for k in ema_checkpoint.keys()):
+            print('Filtering out text_encoder keys from EMA checkpoint...')
+            ema_checkpoint = {k: v for k, v in ema_checkpoint.items() if not k.startswith('text_encoder')}
+        
+        # Handle DataParallel keys for EMA model
+        ema_state_dict = ema_model.module.state_dict() if hasattr(ema_model, 'module') else ema_model.state_dict()
+        if any(k.startswith('module.') for k in ema_checkpoint.keys()) and not any(k.startswith('module.') for k in ema_state_dict.keys()):
+            ema_checkpoint = {k.replace('module.', '') if k.startswith('module.') else k: v for k, v in ema_checkpoint.items()}
+        elif any(k.startswith('module.') for k in ema_state_dict.keys()) and not any(k.startswith('module.') for k in ema_checkpoint.keys()):
+            ema_checkpoint = {('module.' + k): v for k, v in ema_checkpoint.items()}
+        
+        ema_model.load_state_dict(ema_checkpoint, strict=False)
         ema_model.eval()
         
         if args.sampling_mode == 'single_sampling':
@@ -736,6 +850,7 @@ def main():
                 
                 print('style', s)
                 labels = torch.tensor([s]).long().to(args.device)
+                punctuation = string.punctuation
                 ema_sampled_images = diffusion.sampling(ema_model, vae, n=len(labels), x_text=x_text, labels=labels, args=args, style_extractor=feature_extractor, noise_scheduler=ddim, transform=transform, character_classes=None, tokenizer=tokenizer, text_encoder=text_encoder, run_idx=None)  
                 save_single_images(ema_sampled_images, os.path.join(f'./image_samples/', f'{x_text}_style_{s}.png'), args)
 
@@ -744,6 +859,7 @@ def main():
             print('Sampling paragraph')
             #make the code to generate lines
             lines = 'In this work , we focus on style variation . We present a novel method to control the style of the text . Our method is able to mimic various writing styles .'
+            punctuation = string.punctuation
             fakes= []
             gap = np.ones((64, 16))
             max_line_width = 900

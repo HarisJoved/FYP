@@ -1263,101 +1263,65 @@ class UNetModel(nn.Module):
         self.output_blocks.apply(convert_module_to_f32)
   
     
-    def forward(self, x, timesteps=None, context=None, y=None, mix_rate=None, style_extractor=None, **kwargs):
+    def forward(self, x, timesteps=None, context=None, y=None, original_images=None, mix_rate=None, style_extractor=None, style_extractor_model=None, **kwargs):
         """
-        Apply the model to an input batch.
-        :param x: an [N x C x ...] Tensor of inputs.
-        :param timesteps: a 1-D batch of timesteps.
-        :param context: conditioning plugged in via crossattn
-        :param y: an [N] Tensor of labels, if class-conditional.
-        :return: an [N x C x ...] Tensor of outputs.
+        Fixed version - handles custom style images properly
         """
-        #print('y', y.shape)
-        
-        # assert (y is not None) == (
-        #     self.num_classes is not None
-        # ), "must specify y if and only if the model is class-conditional"
+        # CRITICAL FIX: Use the correct style_extractor (avoid name clash)
+        if style_extractor_model is not None:
+            style_extractor = style_extractor_model
+            
         hs = []
-        
-        t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False)#.to(x.device)
+        t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False)
         emb = self.time_embed(t_emb)
-        
-        
-        #if self.num_classes is not None:
-         #   assert y.shape == (x.shape[0],)
-        if style_extractor is not None:
-            s_id = style_extractor
-            y = s_id.to(x.device)
-           
-        if self.interpolation:
-            
-            s1 = random.randint(0, 338)
-            s2 = random.randint(0, 338)
-            while s1 == s2:
-                s2 = random.randint(0, 338)
-            y1 = torch.tensor([s1]).long().to(x.device)
-            y2 = torch.tensor([s2]).long().to(x.device)
-            y1 = self.label_emb(y1).to(x.device)
-            y2 = self.label_emb(y2).to(x.device)
-            y = (1-self.mix_rate)*y1 + self.mix_rate*y2
-            
-            y = y.to(x.device)
-            emb = emb + y  
-        else:
-            if style_extractor is not None:
-                
-                b, e = emb.shape
-                
-                y = y.reshape(b, 5, -1)
-                y = torch.mean(y, dim=1)
 
-                noise=False
-                if noise==True:
-                    magn = torch.norm(y, dim=1, keepdim=True)
-                    noise = torch.randn_like(y)*0.25
-                    #bernoulli mask in noise
-                    noise = noise*torch.bernoulli(torch.ones_like(noise)*0.2)
-                    
-                    y = y + noise
-                    y = magn * y / torch.norm(y, dim=1, keepdim=True)
-                
-                y = self.style_lin(y)
-                
-                emb = emb + y 
-              
-            else:
-                emb = emb + self.label_emb(y)
-            
+        # === CUSTOM STYLE INJECTION (your handwriting) ===
+        if original_images is not None and style_extractor is not None:
+            with torch.no_grad():
+                style_feats = style_extractor(original_images)      # [N, 1280]
+            style_feat = style_feats.mean(dim=0, keepdim=True)       # [1, 1280]
+            style_emb = self.style_lin(style_feat)                   # [1, 320]
+            emb = emb + style_emb.expand_as(emb)                     # Add to time embedding
+
+        # === Writer ID interpolation (not used in custom mode) ===
+        elif self.interpolation and self.num_classes is not None:
+            s1 = torch.randint(0, self.num_classes, (1,), device=x.device)
+            s2 = torch.randint(0, self.num_classes, (1,), device=x.device)
+            while s1 == s2:
+                s2 = torch.randint(0, self.num_classes, (1,), device=x.device)
+            e1 = self.label_emb(s1)
+            e2 = self.label_emb(s2)
+            writer_emb = (1 - self.mix_rate) * e1 + self.mix_rate * e2
+            emb = emb + writer_emb
+
+        # === Normal writer ID mode ===
+        elif y is not None and self.num_classes is not None:
+            writer_emb = self.label_emb(y)
+            emb = emb + writer_emb
+
+        # === Text conditioning ===
         if context is not None:
-            
-            context = self.text_encoder(**context).last_hidden_state#.to(x.device)
-           
+            context = self.text_encoder(**context).last_hidden_state
             if self.cont_dim == 320:
-                context = self.text_lin(context)#.unsqueeze(1)
-                
+                context = self.text_lin(context)
+
         h = x.type(self.dtype)
-        context = context.to(h.device)
-        
-        #INPUT BLOCKS
+
+        # Input blocks
         for module in self.input_blocks:
             h = module(h, emb, context)
             hs.append(h)
-        
-        #MIDDLE BLOCK
+
+        # Middle block
         h = self.middle_block(h, emb, context)
-        
-        #OUTPUT BLOCKS
+
+        # Output blocks
         for module in self.output_blocks:
             h = torch.cat([h, hs.pop()], dim=1)
             h = module(h, emb, context)
-            
+
         h = h.type(x.dtype)
-        
-        if self.predict_codebook_ids:
-            return self.id_predictor(h)
-        else:
-            
-            return self.out(h)
+        return self.out(h)
 
 
 

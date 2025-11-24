@@ -48,14 +48,14 @@ class IAMDataset(WordLineDataset):
         def gather_iam_info(self, set='train', level='word'):
             if subset == 'train':
                 #valid_set = np.loadtxt(self.trainset_file, dtype=str)
-                valid_set = np.loadtxt('./aachen_iam_split/train_val.uttlist', dtype=str)
+                valid_set = np.loadtxt('./utils/aachen_iam_split/train_val.uttlist', dtype=str)
                 #print(valid_set)
             elif subset == 'val':
                 #valid_set = np.loadtxt(self.valset_file, dtype=str)
-                valid_set = np.loadtxt('./aachen_iam_split/validation.uttlist', dtype=str)
+                valid_set = np.loadtxt('./utils/aachen_iam_split/validation.uttlist', dtype=str)
             elif subset == 'test':
                 #valid_set = np.loadtxt(self.testset_file, dtype=str)
-                valid_set = np.loadtxt('./aachen_iam_split/test.uttlist', dtype=str)
+                valid_set = np.loadtxt('./utils/aachen_iam_split/test.uttlist', dtype=str)
             else:
                 raise ValueError
             if level == 'word':
